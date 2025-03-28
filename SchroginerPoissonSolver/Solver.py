@@ -1,44 +1,69 @@
 import numpy as np
+import scipy.constants as const
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import scipy.constants as const
+
 
 class PoissonSolver2D:
-    """Solves the 2D Poisson equation using finite difference method"""
-    def __init__(self, grid_shape, epsilon, doping_profile):
+    """Solves the 2D Poisson equation using Gauss-Seidel with custom boundary conditions"""
+    def __init__(self, grid_shape, epsilon, doping_profile, bias_boundaries, tol=1e-3, max_iter=1000):
         self.grid_shape = grid_shape
         self.epsilon = epsilon
         self.doping_profile = doping_profile
+        self.bias_boundaries = bias_boundaries
+        self.tol = tol
+        self.max_iter = max_iter
         self.phi = np.zeros(grid_shape)
+        self.rho = np.zeros(grid_shape)
+
+    def boundary_gate(self, x, y):
+        return self.bias_boundaries[0] if (int(self.grid_shape[0] / 3.0) < x < 66) and (y == 0) else 0
+
+    def boundary_source(self, x, y):
+        return self.bias_boundaries[1] if (x < int(self.grid_shape[0] / 3.0)) and (y == self.grid_shape[1] - 1) else 0
+
+    def boundary_drain(self, x, y):
+        return self.bias_boundaries[2] if (x > int(2 * self.grid_shape[0] / 3.0)) and (y == self.grid_shape[1] - 1) else 0
+
+    def boundary_top(self, x, y):
+        return self.bias_boundaries[3] if (int(self.grid_shape[0] / 3.0) < x < int(2 * self.grid_shape[0] / 3.0)) and (y == self.grid_shape[1] - 1) else 0
+
+    def _set_boundary_conditions(self):
+        X, Y = self.grid_shape
+        for i in range(X):
+            self.phi[0, i] = self.boundary_gate(i, 0)
+            self.phi[Y - 1, i] = self.boundary_top(i, Y - 1) + self.boundary_source(i, Y - 1) + self.boundary_drain(i, Y - 1)
 
     def solve(self, electron_density):
-        """Solves 2D Poisson equation using finite difference method"""
-        Nx, Ny = self.grid_shape
-        dx = dy = 1e-9  # 1 nm grid spacing
+        q = const.e
+        self.rho = q * (self.doping_profile - electron_density) / self.epsilon
 
-        N = Nx * Ny
-        A = sp.lil_matrix((N, N))
+        iteration = 0
+        error = np.inf
+        while iteration < self.max_iter and error > self.tol:
+            phi_prime = self.phi.copy()
+            for i in range(1, self.grid_shape[0] - 1):
+                for j in range(1, self.grid_shape[1] - 1):
+                    if self.boundary_source(i, j):
+                        phi_prime[i, j] = self.bias_boundaries[1]
+                    elif self.boundary_drain(i, j):
+                        phi_prime[i, j] = self.bias_boundaries[2]
+                    elif self.boundary_gate(i, j):
+                        phi_prime[i, j] = self.bias_boundaries[0]
+                    elif self.boundary_top(i, j):
+                        phi_prime[i, j] = self.bias_boundaries[3]
+                    else:
+                        phi_prime[i, j] = 0.25 * (
+                            self.phi[i + 1, j] + self.phi[i - 1, j] +
+                            self.phi[i, j + 1] + self.phi[i, j - 1] -
+                            self.rho[i, j])
+            self._set_boundary_conditions()
+            error = np.max(np.abs(phi_prime - self.phi))
+            self.phi = phi_prime
+            iteration += 1
 
-        for i in range(N):
-            A[i, i] = -4
-            if i % Nx != 0:
-                A[i, i - 1] = 1
-            if (i + 1) % Nx != 0:
-                A[i, i + 1] = 1
-            if i >= Nx:
-                A[i, i - Nx] = 1
-            if i < N - Nx:
-                A[i, i + Nx] = 1
-
-        A /= dx ** 2
-        A = sp.csr_matrix(A)
-
-        rho = const.e * (self.doping_profile - electron_density) / self.epsilon
-        rho_vector = rho.flatten()
-
-        phi_vector = spla.spsolve(A, -rho_vector)
-        self.phi = phi_vector.reshape((Nx, Ny))
         return self.phi
+
 
 
 class SchrodingerSolver2D:
@@ -90,9 +115,9 @@ class ElectronDensity2D:
 
 class SchrodingerPoissonSolver2D:
     """Self-consistent 2D Schrödinger-Poisson solver"""
-    def __init__(self, grid_shape, epsilon, effective_mass, doping_profile, temperature, fermi_level, tol=1e-5, max_iter=100):
+    def __init__(self, grid_shape, epsilon, effective_mass, doping_profile, temperature, fermi_level, bias_boundaries, tol=1e-5, max_iter=100):
         self.grid_shape = grid_shape
-        self.poisson = PoissonSolver2D(grid_shape, epsilon, doping_profile)
+        self.poisson = PoissonSolver2D(grid_shape, epsilon, doping_profile, bias_boundaries)
         self.schrodinger = SchrodingerSolver2D(grid_shape, effective_mass)
         self.electron_density_solver = ElectronDensity2D(temperature, fermi_level)
         self.tol = tol
@@ -118,4 +143,3 @@ class SchrodingerPoissonSolver2D:
             n_old = n_new
 
         return phi, energy_levels, wavefunctions, n_new
-
